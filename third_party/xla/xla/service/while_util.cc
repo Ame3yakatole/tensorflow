@@ -18,6 +18,8 @@ limitations under the License.
 #include <cstdint>
 #include <iterator>
 #include <memory>
+#include <numeric>
+#include <stack>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -27,6 +29,8 @@ limitations under the License.
 #include "absl/container/inlined_vector.h"
 #include "absl/functional/function_ref.h"
 #include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
 #include "xla/comparison_util.h"
@@ -363,6 +367,36 @@ WhileUtil::GetGTEsMapForWhileConditional(
     }
   }
   return result;
+}
+
+/*static*/
+absl::Status WhileUtil::IncrementWhileLoopTripCount(
+    HloComputation* while_conditional, int32_t increment) {
+  HloInstruction* compare = while_conditional->root_instruction();
+  if (compare->opcode() != HloOpcode::kCompare) {
+    return absl::InvalidArgumentError("While condition root is not a compare");
+  }
+  HloInstruction* trip_count;
+  if ((compare->comparison_direction() == ComparisonDirection::kGt) ||
+      (compare->comparison_direction() == ComparisonDirection::kGe)) {
+    trip_count = compare->mutable_operand(0);
+  } else if ((compare->comparison_direction() == ComparisonDirection::kLt) ||
+             (compare->comparison_direction() == ComparisonDirection::kLe)) {
+    trip_count = compare->mutable_operand(1);
+  } else {
+    return absl::InvalidArgumentError("Unhandled comparison direction");
+  }
+  if (trip_count->user_count() > 1) {
+    return absl::InvalidArgumentError(
+        "Not able to handle trip count with multiple users");
+  }
+  HloInstruction* increment_constant =
+      while_conditional->AddInstruction(HloInstruction::CreateConstant(
+          LiteralUtil::CreateR0<int32_t>(increment)));
+  HloInstruction* incremented_trip_count = while_conditional->AddInstruction(
+      HloInstruction::CreateBinary(trip_count->shape(), HloOpcode::kAdd,
+                                   trip_count, increment_constant));
+  return trip_count->ReplaceAllUsesWith(incremented_trip_count);
 }
 
 }  // namespace xla
