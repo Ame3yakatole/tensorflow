@@ -16,6 +16,8 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_TPU_TPU_EMBEDDING_CONFIGURATION_UTILS_H_
 #define TENSORFLOW_CORE_TPU_TPU_EMBEDDING_CONFIGURATION_UTILS_H_
 
+#include <cstdint>
+
 #include "absl/status/statusor.h"
 #include "tensorflow/core/protobuf/tpu/tpu_embedding_configuration.pb.h"
 
@@ -26,7 +28,7 @@ namespace tpu {
 // specific is erroneous, returns an invalid argument error. For correct tag
 // specification, see the comment next to the DynamicLearningRate proto in
 // //third_party/tensorflow/core/protobuf/tpu/optimization_parameters.proto.
-absl::StatusOr<int32_t> ComputeTotalTagCountForDynamicLearningRates(
+absl::StatusOr<int32_t> ComputeTotalTagCountForDynamicInputs(
     const tensorflow::tpu::TPUEmbeddingConfiguration& tpu_embedding_config);
 
 }  // namespace tpu

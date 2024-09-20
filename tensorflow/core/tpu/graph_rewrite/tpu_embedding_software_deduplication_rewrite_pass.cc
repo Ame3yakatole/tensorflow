@@ -16,6 +16,7 @@ limitations under the License.
 
 #include <iterator>
 #include <string>
+#include <vector>
 
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
@@ -36,7 +37,6 @@ limitations under the License.
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/graph/graph.h"
 #include "tensorflow/core/graph/tensor_id.h"
-#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/protobuf/tpu/tpu_embedding_configuration.pb.h"
@@ -57,7 +57,7 @@ absl::Status CheckNumInputsOrOutputs(
     const tpu::TPUEmbeddingConfiguration& tpu_embedding_config) {
   if (tpu_embedding_config.feature_descriptor_size() == 0 &&
       num_input_or_outputs != tpu_embedding_config.table_descriptor_size()) {
-    return errors::InvalidArgument(absl::StrFormat(
+    return absl::InvalidArgumentError(absl::StrFormat(
         "Number of tables in the TPU embedding config: %d does not match the "
         "%s attribute: %d in the %s node.",
         tpu_embedding_config.table_descriptor_size(), attribute_name,
@@ -66,7 +66,7 @@ absl::Status CheckNumInputsOrOutputs(
 
   if (tpu_embedding_config.feature_descriptor_size() > 0 &&
       num_input_or_outputs != tpu_embedding_config.feature_descriptor_size()) {
-    return errors::InvalidArgument(absl::StrFormat(
+    return absl::InvalidArgumentError(absl::StrFormat(
         "Feature descriptor is set in tpu embedding config. But number of "
         "features in the TPU embedding config: %d does not match the "
         "%s attribute: %d in the %s node.",
@@ -117,7 +117,7 @@ absl::StatusOr<NodeDef> MakeRecvActivationsNodeDef(
     absl::Span<const NodeDefBuilder::NodeOut> data_inputs,
     absl::Span<const std::string> control_inputs) {
   if (!data_inputs.empty()) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         absl::StrFormat("Expected to have zero inputs for "
                         "RecvTPUEmbeddingActivations node, found %d inputs.",
                         data_inputs.size()));
@@ -126,7 +126,7 @@ absl::StatusOr<NodeDef> MakeRecvActivationsNodeDef(
   tpu::TPUEmbeddingConfiguration tpu_embedding_config;
   if (!tpu_embedding_config.ParseFromString(
           std::string(tpu_embedding_config_str))) {  // NOLINT
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "Malformed config attribute in the RecvTPUEmbeddingActivations node.");
   }
 
@@ -181,9 +181,8 @@ absl::StatusOr<NodeDef> MakeSendGradientsNodeDef(
     absl::Span<const NodeDefBuilder::NodeOut> data_inputs,
     absl::Span<const std::string> control_inputs) {
   tpu::TPUEmbeddingConfiguration tpu_embedding_config;
-  if (!tpu_embedding_config.ParseFromString(
-          std::string(tpu_embedding_config_str))) {  // NOLINT
-    return errors::InvalidArgument(
+  if (!tpu_embedding_config.ParseFromString(tpu_embedding_config_str)) {
+    return absl::InvalidArgumentError(
         "Malformed config attribute in the SendTPUEmbeddingGradients node.");
   }
 
@@ -195,37 +194,39 @@ absl::StatusOr<NodeDef> MakeSendGradientsNodeDef(
                                              "SendTPUEmbeddingGradients",
                                              tpu_embedding_config));
 
-  int32 learning_rate_tag_count = 0;
+  int32 dynamic_inputs_tag_count = 0;
   if (!GetNodeAttr(AttrSlice(old_gradients_node_def), "NN",
-                   &learning_rate_tag_count)
+                   &dynamic_inputs_tag_count)
            .ok()) {
     LOG(INFO)
         << "Missing the NN attribute (number of dynamic learning rate tags) in "
            "the SendTPUEmbeddingGradients node. Setting the value to 0.";
   }
 
-  auto status_or_lr_tag_count =
-      tpu::ComputeTotalTagCountForDynamicLearningRates(tpu_embedding_config);
-  if (!status_or_lr_tag_count.ok()) {
-    return errors::InvalidArgument(status_or_lr_tag_count.status().message());
+  auto status_or_dynamic_inputs_tag_count =
+      tpu::ComputeTotalTagCountForDynamicInputs(tpu_embedding_config);
+  if (!status_or_dynamic_inputs_tag_count.ok()) {
+    return absl::InvalidArgumentError(
+        status_or_dynamic_inputs_tag_count.status().message());
   }
 
-  const int32 expected_learning_rate_tag_count = status_or_lr_tag_count.value();
+  const int32 expected_dynamic_inputs_tag_count =
+      status_or_dynamic_inputs_tag_count.value();
 
-  if (learning_rate_tag_count != expected_learning_rate_tag_count) {
-    return errors::InvalidArgument(absl::StrFormat(
+  if (dynamic_inputs_tag_count != expected_dynamic_inputs_tag_count) {
+    return absl::InvalidArgumentError(absl::StrFormat(
         "Number of dynamic learning rate tags in the TPU embedding config: %d "
         "does not match the NN attribute: %d in the SendTPUEmbeddingGradients "
         "node.",
-        expected_learning_rate_tag_count, learning_rate_tag_count));
+        expected_dynamic_inputs_tag_count, dynamic_inputs_tag_count));
   }
 
   if (data_inputs.size() !=
-      static_cast<uint64>(num_inputs + learning_rate_tag_count)) {
-    return errors::InvalidArgument(absl::StrFormat(
+      static_cast<uint64>(num_inputs + dynamic_inputs_tag_count)) {
+    return absl::InvalidArgumentError(absl::StrFormat(
         "Mismatch in the number of inputs for SendTPUEmbeddingGradients node, "
         "expected: %d, actual: %d",
-        num_inputs + learning_rate_tag_count, data_inputs.size()));
+        num_inputs + dynamic_inputs_tag_count, data_inputs.size()));
   }
 
   NodeDefBuilder builder(old_gradients_node_def.name(),
@@ -237,7 +238,7 @@ absl::StatusOr<NodeDef> MakeSendGradientsNodeDef(
   // The Numtables here can be interpreted as num features if the feature
   //  descriptor is present in the config.
   builder.Attr("NumTables", num_inputs)
-      .Attr("NumLearningRateTags", learning_rate_tag_count)
+      .Attr("NumLearningRateTags", dynamic_inputs_tag_count)
       .Attr("config", tpu_embedding_config_str);
   if (!tpu_replicate_attr.empty()) {
     builder.Attr("_tpu_replicate", tpu_replicate_attr);
@@ -250,7 +251,7 @@ absl::StatusOr<NodeDef> MakeSendGradientsNodeDef(
 
   builder.Input(absl::MakeConstSpan(data_inputs.data(), num_inputs))
       .Input(absl::MakeConstSpan(data_inputs.data() + num_inputs,
-                                 learning_rate_tag_count))
+                                 dynamic_inputs_tag_count))
       .Input(absl::StrCat(deduplication_data_node_name, ":output"),
              /*src_index=*/0, DT_VARIANT);
   for (const std::string& control_input : control_inputs) {
@@ -281,7 +282,7 @@ struct SendRecvNodesMapKey {
                       s.requested_device);
   }
 
-  const inline bool operator==(const SendRecvNodesMapKey& s) const {
+  inline bool operator==(const SendRecvNodesMapKey& s) const {
     return (tpu_replicate_attr == s.tpu_replicate_attr &&
             requested_device == s.requested_device);
   }
@@ -341,7 +342,7 @@ Status ValidateAndGetTPUEmbeddingConfiguration(
         GetNodeAttr(gradients_node->def(), "config", &gradients_config_str));
 
     if (activations_config_str != gradients_config_str) {
-      return errors::InvalidArgument(absl::StrFormat(
+      return absl::InvalidArgumentError(absl::StrFormat(
           "TPU embedding config attributes of RecvTPUEmbeddingActivations and "
           "SendTPUEmbeddingGradients nodes with the same tpu_replicate attr: "
           "%s are not identical.",
@@ -349,7 +350,7 @@ Status ValidateAndGetTPUEmbeddingConfiguration(
     }
     if (activations_node->assigned_device_name() !=
         gradients_node->assigned_device_name()) {
-      return errors::InvalidArgument(absl::StrFormat(
+      return absl::InvalidArgumentError(absl::StrFormat(
           "Mismatch in assigned device names for the "
           "RecvTPUEmbeddingActivations (%s) and SendTPUEmbeddingGradients (%s) "
           "nodes with the same tpu_replicate attr: %s.",
@@ -358,7 +359,7 @@ Status ValidateAndGetTPUEmbeddingConfiguration(
     }
     if (activations_node->assigned_device_name_index() !=
         gradients_node->assigned_device_name_index()) {
-      return errors::InvalidArgument(absl::StrFormat(
+      return absl::InvalidArgumentError(absl::StrFormat(
           "Mismatch in assigned device name indices for the "
           "RecvTPUEmbeddingActivations (%d) and SendTPUEmbeddingGradients (%d) "
           "nodes with the same tpu_replicate attr: %s.",
@@ -368,7 +369,7 @@ Status ValidateAndGetTPUEmbeddingConfiguration(
   }
 
   if (activations_node == nullptr && gradients_node == nullptr) {
-    return errors::Internal(absl::StrFormat(
+    return absl::InternalError(absl::StrFormat(
         "Found tpu_replicate attr: %s with no corresponding "
         "RecvTPUEmbeddingActivations or SendTPUEmbeddingGradients nodes",
         tpu_replicate_attr));
@@ -576,13 +577,13 @@ Status InsertActivationsNodeIntoMap(Node* activations_node,
   const SendRecvNodesMap::iterator it = send_recv_nodes_map->find(key);
   if (it != send_recv_nodes_map->end()) {
     if (it->second.activations_node != nullptr) {
-      return errors::AlreadyExists(absl::StrFormat(
+      return absl::AlreadyExistsError(absl::StrFormat(
           "Found duplicate RecvTPUEmbeddingActivations node in graph with "
           "tpu_replicate attr: %s and requested_device: %s",
           tpu_replicate_attr, requested_device));
     }
     if (it->second.gradients_node == nullptr) {
-      return errors::Internal(absl::StrFormat(
+      return absl::InternalError(absl::StrFormat(
           "Found map object with no RecvTPUEmbeddingActivations or "
           "SendTPUEmbeddingGradients nodes and tpu_replicate attr: %s and "
           "requested_device: %s",
@@ -616,13 +617,13 @@ Status InsertGradientsNodeIntoMap(Node* gradients_node,
   const SendRecvNodesMap::iterator it = send_recv_nodes_map->find(key);
   if (it != send_recv_nodes_map->end()) {
     if (it->second.gradients_node != nullptr) {
-      return errors::AlreadyExists(absl::StrFormat(
+      return absl::AlreadyExistsError(absl::StrFormat(
           "Found duplicate SendTPUEmbeddingGradients node in graph with "
           "tpu_replicate attr: %s and requested_device: %s",
           tpu_replicate_attr, requested_device));
     }
     if (it->second.activations_node == nullptr) {
-      return errors::Internal(absl::StrFormat(
+      return absl::InternalError(absl::StrFormat(
           "Found map object with no RecvTPUEmbeddingActivations or "
           "SendTPUEmbeddingGradients nodes and tpu_replicate attr: %s and "
           "requested_device: %s",
@@ -779,13 +780,13 @@ Status MergeRewriterConfigs(const RewriterConfig& rewriter_config,
         rewriter_config.tpu_embedding_config_str;
   } else {
     if (final_rewriter_config->device_name != rewriter_config.device_name) {
-      return errors::InvalidArgument(absl::StrFormat(
+      return absl::InvalidArgumentError(absl::StrFormat(
           "Mismatch in device names for TPU embedding nodes: %s != %s",
           final_rewriter_config->device_name, rewriter_config.device_name));
     }
     if (final_rewriter_config->tpu_replicate_attr !=
         rewriter_config.tpu_replicate_attr) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(
           absl::StrFormat("Mismatch in _tpu_replicate attributes for TPU "
                           "embedding nodes: %s != %s",
                           final_rewriter_config->tpu_replicate_attr,
@@ -793,7 +794,7 @@ Status MergeRewriterConfigs(const RewriterConfig& rewriter_config,
     }
     if (final_rewriter_config->tpu_embedding_config_str !=
         rewriter_config.tpu_embedding_config_str) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(
           absl::StrFormat("Mismatch in config attributes for TPU "
                           "embedding nodes: %s != %s",
                           final_rewriter_config->tpu_embedding_config_str,
@@ -805,7 +806,7 @@ Status MergeRewriterConfigs(const RewriterConfig& rewriter_config,
 
   if (!rewriter_config.activations_node_def_name.empty()) {
     if (!final_rewriter_config->activations_node_def_name.empty()) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(
           absl::StrFormat("Found duplicate RecvTPUEmbeddingActivations nodes "
                           "%s and %s in function.",
                           rewriter_config.activations_node_def_name,
@@ -816,7 +817,7 @@ Status MergeRewriterConfigs(const RewriterConfig& rewriter_config,
   }
   if (!rewriter_config.gradients_node_def_name.empty()) {
     if (!final_rewriter_config->gradients_node_def_name.empty()) {
-      return errors::InvalidArgument(
+      return absl::InvalidArgumentError(
           absl::StrFormat("Found duplicate SendTPUEmbeddingGradients nodes %s "
                           "and %s in function.",
                           rewriter_config.gradients_node_def_name,
