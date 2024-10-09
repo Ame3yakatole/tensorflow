@@ -39,6 +39,7 @@ limitations under the License.
 #include "xla/service/pattern_matcher_gmock.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
+#include "xla/side_effect_util.h"
 #include "xla/tests/hlo_test_base.h"
 #include "xla/tests/verified_hlo_module.h"
 #include "xla/tsl/lib/core/status_test_util.h"
@@ -4188,6 +4189,69 @@ TEST_F(HostOffloaderTest, AvoidRedundantCopiesToHost) {
   for (HloInstruction* instr : module->entry_computation()->instructions()) {
     ASSERT_NE(instr->opcode(), HloOpcode::kCopy);
   }
+}
+
+TEST_F(HostOffloaderTest, MarkAllGatherCollectiveAsHostCompute) {
+  const absl::string_view hlo_string = R"(
+HloModule jit_f, entry_computation_layout={(f32[1024,256]{1,0:T(8,128)}, f32[1024,256]{1,0:T(8,128)})->f32[1024,1024]{1,0:T(8,128)S(5)}}, num_partitions=4
+
+ENTRY main.8_spmd {
+  param = f32[1024,256]{1,0:T(8,128)} parameter(0), sharding={devices=[1,4]<=[4]}
+  param.1 = f32[1024,256]{1,0:T(8,128)} parameter(1), sharding={devices=[1,4]<=[4]}
+  add.0 = f32[1024,256]{1,0:T(8,128)} add(param, param.1)
+  custom-call.2 = f32[1024,256]{1,0:T(8,128)} custom-call(add.0), custom_call_target="MoveToHost"
+  all-gather = f32[1024,1024]{1,0:T(8,128)} all-gather(custom-call.2), channel_id=1, replica_groups=[1,4]<=[4], dimensions={1}, use_global_device_ids=true
+  ROOT custom-call.3 = f32[1024,1024]{1,0:T(8,128)} custom-call(all-gather), custom_call_target="MoveToHost"
+})";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed, RunHostOffloader(module.get()));
+  EXPECT_TRUE(changed);
+  VLOG(1) << module->ToString();
+
+  HloInstruction* all_gather = FindInstruction(module.get(), "all-gather");
+  ASSERT_NE(all_gather, nullptr);
+  ASSERT_TRUE(
+      all_gather->frontend_attributes().map().contains(kXlaComputeTypeAttr));
+  EXPECT_EQ(all_gather->frontend_attributes().map().at(kXlaComputeTypeAttr),
+            kXlaComputeTypeHost);
+}
+
+TEST_F(HostOffloaderTest, MarkAllReduceCollectiveAsHostCompute) {
+  const absl::string_view hlo_string = R"(
+HloModule jit_f, entry_computation_layout={(f32[704]{0:T(1024)},u32[]{:T(128)})->f32[1408]{0:T(1024)S(5)}}, num_partitions=4
+
+add.580 {
+  x.1158 = f32[]{:T(128)} parameter(0)
+  y.1158 = f32[]{:T(128)} parameter(1)
+  ROOT add.38918 = f32[]{:T(128)} add(x.1158, y.1158)
+}
+
+ENTRY main {
+  param_0 = f32[704]{0:T(1024)} parameter(0)
+  param_1 = u32[]{:T(128)} parameter(1)
+  custom_call_0 = f32[704]{0:T(1024)} custom-call(param_0), custom_call_target="MoveToHost"
+  constant = f32[]{:T(128)} constant(0), metadata={op_name="jit(update_for_history)/jit(main)/jit(_var)/div" source_file="learning/gemini/cms/core/optimizers/base.py" source_line=380}
+  broadcast = f32[1408]{0:T(1024)} broadcast(constant), dimensions={}
+  dus = f32[1408]{0:T(1024)} dynamic-update-slice(broadcast, custom_call_0, param_1), backend_config={"flag_configs":[],"scoped_memory_configs":[],"indi
+ces_config":{"index_known_bits":[{"zeroes":"4294965311","ones":"0","bitwidth":"32"}]},"used_scoped_memory_configs":[]}
+  all_reduce = f32[1408]{0:T(1024)} all-reduce(dus), channel_id=2798, replica_groups=[2,2]<=[4], use_global_device_ids=true, to_apply=add.580
+  ROOT custom_call_1 = f32[1408]{0:T(1024)} custom-call(all_reduce), custom_call_target="MoveToHost"
+})";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<VerifiedHloModule> module,
+                          ParseAndReturnVerifiedModule(hlo_string));
+  TF_ASSERT_OK_AND_ASSIGN(bool changed, RunHostOffloader(module.get()));
+  EXPECT_TRUE(changed);
+  VLOG(1) << module->ToString();
+
+  HloInstruction* all_reduce = FindInstruction(module.get(), "all_reduce");
+  ASSERT_NE(all_reduce, nullptr);
+  ASSERT_TRUE(
+      all_reduce->frontend_attributes().map().contains(kXlaComputeTypeAttr));
+  EXPECT_EQ(all_reduce->frontend_attributes().map().at(kXlaComputeTypeAttr),
+            kXlaComputeTypeHost);
 }
 
 }  // namespace
