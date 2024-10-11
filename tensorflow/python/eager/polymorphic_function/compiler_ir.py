@@ -117,6 +117,7 @@ def from_concrete_function(
         stage=stage,
     )
     if stage in (
+        "stablehlo_serialized",
         "hlo_serialized",
         "optimized_hlo_serialized",
         "optimized_hlo_proto_serialized",
