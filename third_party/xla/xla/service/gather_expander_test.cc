@@ -114,6 +114,60 @@ ENTRY main {
       ShapeUtil::GetTupleElementShape(while_shape, 3)));
 }
 
+TEST_F(GatherExpanderTest, GatherWithBatchDimsToLoop) {
+  const std::string hlo_text = R"(
+HloModule TensorFlowGatherV2
+
+ENTRY main {
+  operand = s32[3,3,5] parameter(0)
+  indices = s32[2,5] parameter(1)
+  ROOT gather = s32[3,2,5] gather(operand, indices),
+      offset_dims={0},
+      collapsed_slice_dims={1},
+      start_index_map={1},
+      index_vector_dim=2,
+      operand_batching_dims={2},
+      start_indices_batching_dims={1},
+      slice_sizes={3,1,1}
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
+                          ParseAndReturnVerifiedModule(hlo_text));
+  TF_ASSERT_OK_AND_ASSIGN(
+      bool changed,
+      GatherExpander{GatherExpander::kEliminateAllGathers}.Run(module.get()));
+  ASSERT_TRUE(changed);
+  HloInstruction* while_instr = nullptr;
+  for (auto* instr : module->entry_computation()->instructions()) {
+    if (instr->opcode() == HloOpcode::kWhile) {
+      ASSERT_EQ(while_instr, nullptr)
+          << "Expected exactly one while instruction in the entry computation "
+             "after gather expansion";
+      while_instr = instr;
+    }
+  }
+
+  ASSERT_NE(while_instr, nullptr)
+      << "Expected exactly one while instruction in the entry computation "
+         "after gather expansion";
+
+  const Shape& while_shape = while_instr->shape();
+  ASSERT_TRUE(while_shape.IsTuple());
+  ASSERT_EQ(ShapeUtil::TupleElementCount(while_shape), 4);
+
+  EXPECT_TRUE(ShapeUtil::SameDimensions(
+      ShapeUtil::MakeShape(S32, {3, 3, 5}),
+      ShapeUtil::GetTupleElementShape(while_shape, 1)));
+
+  EXPECT_TRUE(ShapeUtil::SameDimensions(
+      ShapeUtil::MakeShape(S32, {10}),
+      ShapeUtil::GetTupleElementShape(while_shape, 2)));
+
+  EXPECT_TRUE(ShapeUtil::SameDimensions(
+      ShapeUtil::MakeShape(S32, {10, 3}),
+      ShapeUtil::GetTupleElementShape(while_shape, 3)));
+}
+
 TEST_F(GatherExpanderTest, CheckOpMetadata) {
   const std::string hlo_text = R"(
 HloModule TensorFlowGatherV2
@@ -216,6 +270,35 @@ ENTRY main {
       start_index_map={0},
       index_vector_dim=2,
       slice_sizes={1,3}
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto module, ParseAndReturnVerifiedModule(hlo_text));
+  GatherExpander pass(GatherExpander::kEliminateSimpleGathers);
+  TF_ASSERT_OK_AND_ASSIGN(bool changed, RunHloPass(&pass, module.get()));
+  ASSERT_TRUE(changed);
+  ASSERT_FALSE(hlo_query::ContainsInstrWithOpcode(module->entry_computation(),
+                                                  {HloOpcode::kGather}));
+  ASSERT_TRUE(hlo_query::ContainsInstrWithOpcode(module->entry_computation(),
+                                                 {HloOpcode::kBroadcast}));
+  module->VerifyOrAddFailure("after-gather-expander.");
+}
+
+TEST_F(GatherExpanderTest, GatherIsBroadcastBatchDim) {
+  const std::string hlo_text = R"(
+HloModule test
+
+ENTRY main {
+  operand = s32[1,3,1] parameter(0)
+  indices = s32[1,5] parameter(1)
+  ROOT gather = s32[1,3,5] gather(operand, indices),
+      offset_dims={1},
+      collapsed_slice_dims={2},
+      start_index_map={0},
+      index_vector_dim=2,
+      slice_sizes={1,3,1},
+      operand_batching_dims={0},
+      start_indices_batching_dims={0}
 }
 )";
 

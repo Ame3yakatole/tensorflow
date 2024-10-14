@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "absl/algorithm/container.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/literal_util.h"
 #include "xla/service/hlo_creation_utils.h"
@@ -148,6 +149,20 @@ absl::StatusOr<HloInstruction*> ExpandIndexVectorIntoOperandSpace(
   return MakeConcatHlo(expanded_index_components, /*dimension=*/0);
 }
 
+// Returns the dimensions in a slice that are either collapsed or corresponding
+// to an operand batching dimension.
+std::vector<int64_t> GetDegeneratedSliceDims(
+    const GatherDimensionNumbers& dim_numbers) {
+  absl::Span<const int64_t> collapsed_slice_dims =
+      dim_numbers.collapsed_slice_dims();
+  std::vector<int64_t> removed_dims(collapsed_slice_dims.begin(),
+                                    collapsed_slice_dims.end());
+  absl::Span<const int64_t> batching_dims = dim_numbers.operand_batching_dims();
+  removed_dims.insert(removed_dims.end(), batching_dims.begin(),
+                      batching_dims.end());
+  return removed_dims;
+}
+
 // This generates the body of the while that implements the main data movement
 // behavior of gather using dynamic-slice and dynamic-update-slice.
 absl::StatusOr<std::vector<HloInstruction*>> GatherLoopBody(
@@ -206,7 +221,8 @@ absl::StatusOr<std::vector<HloInstruction*>> GatherLoopBody(
 
   TF_ASSIGN_OR_RETURN(
       HloInstruction* const gathered_slice_with_dims_collapsed,
-      ElideDegenerateDims(gathered_slice, dim_numbers.collapsed_slice_dims()));
+      ElideDegenerateDims(gathered_slice,
+                          GetDegeneratedSliceDims(dim_numbers)));
 
   TF_ASSIGN_OR_RETURN(
       HloInstruction* const gathered_slice_for_update,
@@ -238,8 +254,9 @@ HloInstruction* CreateGatherLoopAccumulatorInitValue(
   std::vector<int64_t> accumulator_state_shape_dims;
   accumulator_state_shape_dims.reserve(1 + slice_sizes.size());
   accumulator_state_shape_dims.push_back(gather_loop_trip_count);
+  std::vector<int64_t> degenerate_dims = GetDegeneratedSliceDims(dim_numbers);
   for (int64_t i = 0; i < slice_sizes.size(); i++) {
-    if (!absl::c_binary_search(dim_numbers.collapsed_slice_dims(), i)) {
+    if (!absl::c_linear_search(degenerate_dims, i)) {
       accumulator_state_shape_dims.push_back(slice_sizes[i]);
     }
   }
@@ -336,7 +353,7 @@ absl::StatusOr<HloInstruction*> GatherExpander::ExpandInstruction(
       return MakeScalarLike(gather_instr, 0);
     }
     Shape broadcast_operand_shape = ShapeUtil::DeleteDimensions(
-        gather_instr->gather_dimension_numbers().collapsed_slice_dims(),
+        GetDegeneratedSliceDims(gather_instr->gather_dimension_numbers()),
         gather_instr->operand(0)->shape());
     TF_ASSIGN_OR_RETURN(HloInstruction * broadcast_operand,
                         MakeReshapeHlo(broadcast_operand_shape,
