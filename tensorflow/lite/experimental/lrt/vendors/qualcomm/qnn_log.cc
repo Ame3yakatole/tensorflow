@@ -19,8 +19,8 @@
 #include <cstdio>
 #include <iostream>
 
-#include "third_party/qairt/include/QNN/QnnInterface.h"
-#include "third_party/qairt/include/QNN/QnnLog.h"
+#include "third_party/qairt/latest/include/QNN/QnnInterface.h"
+#include "third_party/qairt/latest/include/QNN/QnnLog.h"
 
 namespace lrt::qnn {
 namespace {

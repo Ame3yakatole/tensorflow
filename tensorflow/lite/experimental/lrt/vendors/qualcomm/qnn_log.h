@@ -15,9 +15,9 @@
 #ifndef TENSORFLOW_LITE_EXPERIMENTAL_LRT_VENDORS_QUALCOMM_QNN_LOG_H_
 #define TENSORFLOW_LITE_EXPERIMENTAL_LRT_VENDORS_QUALCOMM_QNN_LOG_H_
 
-#include "third_party/qairt/include/QNN/QnnInterface.h"
-#include "third_party/qairt/include/QNN/QnnLog.h"
-#include "third_party/qairt/include/QNN/System/QnnSystemInterface.h"
+#include "third_party/qairt/latest/include/QNN/QnnInterface.h"
+#include "third_party/qairt/latest/include/QNN/QnnLog.h"
+#include "third_party/qairt/latest/include/QNN/System/QnnSystemInterface.h"
 
 namespace lrt::qnn {
 
