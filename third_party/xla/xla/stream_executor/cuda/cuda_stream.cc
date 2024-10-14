@@ -32,15 +32,14 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "third_party/gpus/cuda/include/cuda.h"
+#include "xla/stream_executor/activate_context.h"
 #include "xla/stream_executor/cuda/cuda_context.h"
 #include "xla/stream_executor/cuda/cuda_event.h"
 #include "xla/stream_executor/cuda/cuda_kernel.h"
 #include "xla/stream_executor/cuda/cuda_status.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/event.h"
-#include "xla/stream_executor/gpu/context.h"
 #include "xla/stream_executor/gpu/gpu_executor.h"
-#include "xla/stream_executor/gpu/scoped_activate_context.h"
 #include "xla/stream_executor/kernel.h"
 #include "xla/stream_executor/launch_dim.h"
 #include "xla/stream_executor/platform.h"
@@ -52,21 +51,20 @@ namespace stream_executor {
 namespace gpu {
 
 namespace {
-absl::Status WaitStreamOnEvent(Context* context, CUstream stream,
+absl::Status WaitStreamOnEvent(StreamExecutor* executor, CUstream stream,
                                CUevent event) {
-  ScopedActivateContext activation(context);
+  std::unique_ptr<ActivateContext> activation = executor->Activate();
   return cuda::ToStatus(cuStreamWaitEvent(stream, event, 0 /* = flags */));
 }
 
-absl::Status RecordEvent(Context* context, CUevent event, CUstream stream) {
-  ScopedActivateContext activated{context};
+absl::Status RecordGpuEvent(StreamExecutor* executor, CUevent event,
+                            CUstream stream) {
+  std::unique_ptr<ActivateContext> activation = executor->Activate();
   return cuda::ToStatus(cuEventRecord(event, stream),
                         "Error recording CUDA event");
 }
 
-int GetGpuStreamPriority(Context* context,
-                         stream_executor::StreamPriority stream_priority) {
-  ScopedActivateContext activation(context);
+int GetGpuStreamPriority(stream_executor::StreamPriority stream_priority) {
   if (stream_priority == stream_executor::StreamPriority::Default) {
     return 0;
   }
@@ -81,8 +79,8 @@ int GetGpuStreamPriority(Context* context,
                                                                      : lowest;
 }
 
-absl::StatusOr<CUstream> CreateStream(Context* context, int priority) {
-  ScopedActivateContext activated(context);
+absl::StatusOr<CUstream> CreateStream(StreamExecutor* executor, int priority) {
+  std::unique_ptr<ActivateContext> activation = executor->Activate();
   CUstream stream;
   // If the priority is 0, then use the previous api to create the stream with
   // the default priority for backward compatibility. Probably there is no
@@ -95,8 +93,8 @@ absl::StatusOr<CUstream> CreateStream(Context* context, int priority) {
         cuStreamCreateWithPriority(&stream, CU_STREAM_NON_BLOCKING, priority)));
   }
 
-  VLOG(2) << "successfully created stream " << stream << " for context "
-          << context << " on thread";
+  VLOG(2) << "successfully created stream " << stream << " for executor "
+          << executor << " on thread";
   return stream;
 }
 
@@ -110,10 +108,10 @@ absl::StatusOr<bool> StreamIsCapturing(CUstream stream) {
   return status == CU_STREAM_CAPTURE_STATUS_ACTIVE;
 }
 
-absl::Status AsynchronousMemcpyD2H(Context* context, void* host_dst,
+absl::Status AsynchronousMemcpyD2H(StreamExecutor* executor, void* host_dst,
                                    CUdeviceptr gpu_src, uint64_t size,
                                    CUstream stream) {
-  ScopedActivateContext activation(context);
+  std::unique_ptr<ActivateContext> activation = executor->Activate();
 
   TF_RETURN_IF_ERROR(
       cuda::ToStatus(cuMemcpyDtoHAsync(host_dst, gpu_src, size, stream)));
@@ -124,10 +122,10 @@ absl::Status AsynchronousMemcpyD2H(Context* context, void* host_dst,
   return absl::OkStatus();
 }
 
-absl::Status AsynchronousMemcpyH2D(Context* context, CUdeviceptr gpu_dst,
-                                   const void* host_src, uint64_t size,
-                                   CUstream stream) {
-  ScopedActivateContext activation(context);
+absl::Status AsynchronousMemcpyH2D(StreamExecutor* executor,
+                                   CUdeviceptr gpu_dst, const void* host_src,
+                                   uint64_t size, CUstream stream) {
+  std::unique_ptr<ActivateContext> activation = executor->Activate();
   TF_RETURN_IF_ERROR(
       cuda::ToStatus(cuMemcpyHtoDAsync(gpu_dst, host_src, size, stream)));
 
@@ -137,10 +135,10 @@ absl::Status AsynchronousMemcpyH2D(Context* context, CUdeviceptr gpu_dst,
   return absl::OkStatus();
 }
 
-absl::Status AsynchronousMemcpyD2D(Context* context, CUdeviceptr gpu_dst,
-                                   CUdeviceptr gpu_src, uint64_t size,
-                                   CUstream stream) {
-  ScopedActivateContext activation(context);
+absl::Status AsynchronousMemcpyD2D(StreamExecutor* executor,
+                                   CUdeviceptr gpu_dst, CUdeviceptr gpu_src,
+                                   uint64_t size, CUstream stream) {
+  std::unique_ptr<ActivateContext> activation = executor->Activate();
 
   // In graph capture mode we never have operations that access peer memory, so
   // we can always make a call to cuMemcpyDtoDAsync.
@@ -184,15 +182,15 @@ absl::StatusOr<std::unique_ptr<CudaStream>> CudaStream::Create(
     if (priority.has_value() && std::holds_alternative<int>(priority.value())) {
       return std::get<int>(priority.value());
     }
+    std::unique_ptr<ActivateContext> activation = executor->Activate();
     return GetGpuStreamPriority(
-        executor->gpu_context(),
         std::get<StreamPriority>(priority.value_or(StreamPriority::Default)));
   }();
   TF_ASSIGN_OR_RETURN(auto stream_handle,
-                      CreateStream(executor->gpu_context(), stream_priority));
+                      CreateStream(executor, stream_priority));
 
   TF_ASSIGN_OR_RETURN(auto completed_event,
-                      CudaEvent::Create(executor->gpu_context(),
+                      CudaEvent::Create(executor,
                                         /*allow_timing=*/false));
 
   return std::unique_ptr<CudaStream>(new CudaStream(
@@ -203,18 +201,17 @@ absl::Status CudaStream::WaitFor(Stream* other) {
   CudaStream* other_stream = static_cast<CudaStream*>(other);
 
   TF_RETURN_IF_ERROR(other_stream->RecordCompletedEvent());
-  return WaitStreamOnEvent(executor_->gpu_context(), gpu_stream(),
+  return WaitStreamOnEvent(executor_, gpu_stream(),
                            other_stream->completed_event_.GetHandle());
 }
 
 absl::Status CudaStream::RecordEvent(Event* event) {
-  return stream_executor::gpu::RecordEvent(
-      executor_->gpu_context(), static_cast<CudaEvent*>(event)->GetHandle(),
-      gpu_stream());
+  return RecordGpuEvent(executor_, static_cast<CudaEvent*>(event)->GetHandle(),
+                        gpu_stream());
 }
 
 absl::Status CudaStream::WaitFor(Event* event) {
-  return WaitStreamOnEvent(executor_->gpu_context(), gpu_stream(),
+  return WaitStreamOnEvent(executor_, gpu_stream(),
                            static_cast<CudaEvent*>(event)->GetHandle());
 }
 
@@ -235,7 +232,7 @@ absl::Status CudaStream::Memset32(DeviceMemoryBase* location, uint32_t pattern,
   if (size % sizeof(uint32_t) != 0) {
     return absl::InvalidArgumentError("size must be a multiple of 4 bytes.");
   }
-  ScopedActivateContext activation(executor_->gpu_context());
+  std::unique_ptr<ActivateContext> activation = executor_->Activate();
   return cuda::ToStatus(
       cuMemsetD32Async(absl::bit_cast<CUdeviceptr>(location->opaque()), pattern,
                        size / 4, gpu_stream()),
@@ -248,7 +245,7 @@ absl::Status CudaStream::MemZero(DeviceMemoryBase* location, uint64_t size) {
       size % sizeof(uint32_t) == 0) {
     return Memset32(location, 0x0, size);
   } else {
-    ScopedActivateContext activation(executor_->gpu_context());
+    std::unique_ptr<ActivateContext> activation = executor_->Activate();
     return cuda::ToStatus(
         cuMemsetD8Async(absl::bit_cast<CUdeviceptr>(location->opaque()), 0x0,
                         size, gpu_stream()),
@@ -260,20 +257,20 @@ absl::Status CudaStream::Memcpy(DeviceMemoryBase* gpu_dst,
                                 const DeviceMemoryBase& gpu_src,
                                 uint64_t size) {
   return AsynchronousMemcpyD2D(
-      executor_->gpu_context(), absl::bit_cast<CUdeviceptr>(gpu_dst->opaque()),
+      executor_, absl::bit_cast<CUdeviceptr>(gpu_dst->opaque()),
       absl::bit_cast<CUdeviceptr>(gpu_src.opaque()), size, gpu_stream());
 }
 
 absl::Status CudaStream::Memcpy(DeviceMemoryBase* gpu_dst, const void* host_src,
                                 uint64_t size) {
-  return AsynchronousMemcpyH2D(executor_->gpu_context(),
+  return AsynchronousMemcpyH2D(executor_,
                                absl::bit_cast<CUdeviceptr>(gpu_dst->opaque()),
                                host_src, size, gpu_stream());
 }
 
 absl::Status CudaStream::Memcpy(void* host_dst, const DeviceMemoryBase& gpu_src,
                                 uint64_t size) {
-  return AsynchronousMemcpyD2H(executor_->gpu_context(), host_dst,
+  return AsynchronousMemcpyD2H(executor_, host_dst,
                                absl::bit_cast<CUdeviceptr>(gpu_src.opaque()),
                                size, gpu_stream());
 }
@@ -300,14 +297,14 @@ absl::Status CudaStream::DoHostCallbackWithStatus(
 }
 
 namespace {
-absl::Status LaunchKernel(Context* context, absl::string_view kernel_name,
-                          CUfunction function, unsigned int grid_dim_x,
-                          unsigned int grid_dim_y, unsigned int grid_dim_z,
-                          unsigned int block_dim_x, unsigned int block_dim_y,
-                          unsigned int block_dim_z,
+absl::Status LaunchKernel(StreamExecutor* executor,
+                          absl::string_view kernel_name, CUfunction function,
+                          unsigned int grid_dim_x, unsigned int grid_dim_y,
+                          unsigned int grid_dim_z, unsigned int block_dim_x,
+                          unsigned int block_dim_y, unsigned int block_dim_z,
                           unsigned int shared_mem_bytes, CUstream stream,
                           void** kernel_params, void** extra) {
-  ScopedActivateContext activation(context);
+  std::unique_ptr<ActivateContext> activation = executor->Activate();
   VLOG(2) << "launching kernel: " << kernel_name << "; gdx: " << grid_dim_x
           << " gdy: " << grid_dim_y << " gdz: " << grid_dim_z
           << " bdx: " << block_dim_x << " bdy: " << block_dim_y
@@ -336,8 +333,9 @@ absl::Status LaunchKernel(Context* context, absl::string_view kernel_name,
                    "; shared memory size: ", shared_mem_bytes));
 }
 
-absl::Status LaunchKernel(Context* context, absl::string_view kernel_name,
-                          CUfunction function, unsigned int cluster_dim_x,
+absl::Status LaunchKernel(StreamExecutor* executor,
+                          absl::string_view kernel_name, CUfunction function,
+                          unsigned int cluster_dim_x,
                           unsigned int cluster_dim_y,
                           unsigned int cluster_dim_z, unsigned int grid_dim_x,
                           unsigned int grid_dim_y, unsigned int grid_dim_z,
@@ -345,7 +343,7 @@ absl::Status LaunchKernel(Context* context, absl::string_view kernel_name,
                           unsigned int block_dim_z,
                           unsigned int shared_mem_bytes, CUstream stream,
                           void** kernel_params, void** extra) {
-  ScopedActivateContext activation(context);
+  std::unique_ptr<ActivateContext> activation = executor->Activate();
   VLOG(2) << "launching kernel: " << kernel_name << "; cdx: " << cluster_dim_x
           << " cdy: " << cluster_dim_y << " cdz: " << cluster_dim_z
           << " gdx: " << grid_dim_x << " gdy: " << grid_dim_y
@@ -419,16 +417,16 @@ absl::Status CudaStream::Launch(const ThreadDim& thread_dims,
     void** params = const_cast<void**>(packed.argument_addresses().data());
 
     if (cluster_dims.has_value()) {
-      return LaunchKernel(executor_->gpu_context(), kernel.name(), function,
-                          cluster_dims->x, cluster_dims->y, cluster_dims->z,
-                          block_dims.x, block_dims.y, block_dims.z,
-                          thread_dims.x, thread_dims.y, thread_dims.z,
+      return LaunchKernel(executor_, kernel.name(), function, cluster_dims->x,
+                          cluster_dims->y, cluster_dims->z, block_dims.x,
+                          block_dims.y, block_dims.z, thread_dims.x,
+                          thread_dims.y, thread_dims.z,
                           packed.number_of_shared_bytes(), gpu_stream(), params,
                           /*extra=*/nullptr);
     } else {
-      return LaunchKernel(executor_->gpu_context(), kernel.name(), function,
-                          block_dims.x, block_dims.y, block_dims.z,
-                          thread_dims.x, thread_dims.y, thread_dims.z,
+      return LaunchKernel(executor_, kernel.name(), function, block_dims.x,
+                          block_dims.y, block_dims.z, thread_dims.x,
+                          thread_dims.y, thread_dims.z,
                           packed.number_of_shared_bytes(), gpu_stream(), params,
                           /*extra=*/nullptr);
     }
