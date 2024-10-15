@@ -17,18 +17,14 @@ package(
     default_visibility = ["//tensorflow/lite/experimental/lrt:__subpackages__"],
 )
 
-cc_binary(
-    name = "apply_plugin",
-    srcs = [
-        "apply_plugin.cc",
-        # TODO: b/366821557 - Support pre-compiled plugins as data dependencies.
-        "//tensorflow/lite/experimental/lrt/vendors/examples:example_plugin_so",
-    ],
+cc_library(
+    name = "dump",
+    srcs = ["dump.cc"],
+    hdrs = ["dump.h"],
     deps = [
-        "//tensorflow/lite/experimental/lrt/core:api_internal",
-        "//tensorflow/lite/experimental/lrt/core:lite_rt_model_init",
-        "//tensorflow/lite/experimental/lrt/core:model",
-        "//tensorflow/lite/experimental/lrt/core/compiler_plugin:algo",
-        "@llvm-project//llvm:Support",
+        "//tensorflow/lite/experimental/lrt/vendors/qualcomm:qnn_manager",
+        "//third_party/qairt:qnn_lib_headers",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/strings:string_view",
     ],
 )
